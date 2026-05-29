@@ -1,5 +1,5 @@
 """
-Three sequential tasks — one per agent.
+Three tasks — extract and score run sequentially; publish batches via one tool call.
 """
 
 from crewai import Task
@@ -57,13 +57,14 @@ def build_tasks(transcript: str) -> list[Task]:
     publish_to_notion = Task(
         description=(
             "Publish every action item from the PUBLISH-READY JSON to Notion.\n\n"
-            "For EACH item in the JSON array, call the Publish Action Item tool ONCE "
-            "with the full item payload. Do NOT skip any item.\n\n"
-            "After all items are published, return a PUBLISH SUMMARY:\n"
+            "Call the Publish Action Item tool ONCE with the entire JSON array as "
+            "action_items_json (not one call per item). Do NOT skip any item.\n\n"
+            "After publishing, return a PUBLISH SUMMARY:\n"
             "- Total items published\n"
             "- Each item: title | owner | priority | risk_score | status\n"
             "- Overall result: SUCCESS / PARTIAL / FAILED"
         ),
+        async_execution=True,
         expected_output=(
             "PUBLISH SUMMARY listing every item with owner, priority, risk score, "
             "and publish status. Overall pipeline result at the bottom."

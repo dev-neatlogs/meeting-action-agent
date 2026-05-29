@@ -113,7 +113,7 @@ def _patch_notion_tool():
     original_run = NotionTool._run
     call_counter = [0]
 
-    def _patched_run(self, action_item_json: str) -> str:
+    def _patched_run(self, action_items_json: str) -> str:
         call_counter[0] += 1
         if call_counter[0] == 4:
             # Simulate Notion rate-limit / transient API error
@@ -122,7 +122,7 @@ def _patch_notion_tool():
                 "with status 429 — rate_limited: The user or workspace is rate limited. "
                 "Retry-After: 32"
             )
-        return original_run(self, action_item_json)
+        return original_run(self, action_items_json)
 
     NotionTool._run = _patched_run
 

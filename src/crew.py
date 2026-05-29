@@ -61,6 +61,8 @@ def run(
         task_idx[0] += 1
         task_start[0] = time.time()
 
+    # Sequential process: extract → score → publish (DAG). Latency wins come from
+    # batch Notion tool calls, parallel Notion API writes, and flash on publish.
     crew = Crew(
         agents=_AGENTS,
         tasks=tasks,

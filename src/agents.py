@@ -3,15 +3,16 @@ Three-agent pipeline.
 
   meeting_analyst      → pure LLM — extracts action items as structured JSON
   risk_scorer_agent    → calls risk_scorer tool (deterministic Python scorer)
-  notion_orchestrator  → calls notion_publisher tool (one call per item)
+  notion_orchestrator  → calls notion_publisher tool (batch array in one call)
 
 Trace topology:
-  meeting_analyst     → 1-2 LLM calls
-  risk_scorer_agent   → 1 LLM call + 1 tool call (risk_scorer)
-  notion_orchestrator → 1 LLM call + N tool calls (notion_publisher, one per item)
+  meeting_analyst     → 1-2 LLM calls (gemini-2.5-pro)
+  risk_scorer_agent   → 1 LLM call + 1 tool call (risk_scorer, gemini-2.5-pro)
+  notion_orchestrator → 1 LLM call + 1 batch tool call (gemini-2.5-flash)
 """
 
 from crewai import Agent
+from src.config import flash_llm as NOTION_LLM
 from src.config import llm as LLM
 from src.tools import NotionTool, RiskScorerTool
 
@@ -61,16 +62,14 @@ risk_scorer_agent = Agent(
 notion_orchestrator = Agent(
     role="Notion Publishing Orchestrator",
     goal=(
-        "Publish every action item to Notion using the Publish Action Item tool — "
-        "one tool call per item, no skipping. Each call must include the full "
-        "enriched payload from the risk scorer output."
+        "Publish every action item to Notion in a single Publish Action Item tool call. "
+        "Pass the full PUBLISH-READY JSON array as action_items_json. Do not skip any item."
     ),
     backstory=(
-        "You are meticulous and patient. You know that publishing 10 items means "
-        "making 10 tool calls — you do not batch, skip, or approximate. "
-        "Every item deserves its own page."
+        "You are meticulous and efficient. You publish complete batches in one tool call "
+        "so every item gets its own Notion page without redundant round-trips."
     ),
-    llm=LLM,
+    llm=NOTION_LLM,
     tools=[_notion_tool],
     verbose=False,
 )

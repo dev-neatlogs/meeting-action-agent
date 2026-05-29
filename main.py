@@ -301,7 +301,7 @@ def _print_banner() -> None:
     )
     console.print(Panel(
         "[bold white]meeting-agent[/bold white]\n"
-        "[dim]3-agent AI pipeline  •  Gemini 2.5 Pro  •  Notion[/dim]\n"
+        "[dim]3-agent AI pipeline  •  Gemini 2.5 Pro/Flash  •  Notion[/dim]\n"
         "[dim]Risk detection  •  Owner resolution  •  Execution strategy[/dim]\n"
         + tracing_line,
         border_style="cyan",

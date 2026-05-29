@@ -12,7 +12,8 @@ Trace topology:
 """
 
 from crewai import Agent
-from src.config import llm as LLM
+from src.config import llm_flash as LLM_FLASH
+from src.config import llm_pro as LLM_PRO
 from src.tools import NotionTool, RiskScorerTool
 
 _notion_tool = NotionTool()
@@ -33,7 +34,7 @@ meeting_analyst = Agent(
         "delegation, the optimistic deadline that has 'slip' written all over it. "
         "Your structured output feeds directly into the risk scorer."
     ),
-    llm=LLM,
+    llm=LLM_PRO,
     verbose=False,
 )
 
@@ -52,7 +53,7 @@ risk_scorer_agent = Agent(
         "every item through each detection pass and produce clean structured output "
         "that the publisher can use directly."
     ),
-    llm=LLM,
+    llm=LLM_PRO,
     tools=[_risk_tool],
     verbose=False,
 )
@@ -61,16 +62,17 @@ risk_scorer_agent = Agent(
 notion_orchestrator = Agent(
     role="Notion Publishing Orchestrator",
     goal=(
-        "Publish every action item to Notion using the Publish Action Item tool — "
-        "one tool call per item, no skipping. Each call must include the full "
-        "enriched payload from the risk scorer output."
+        "Publish every action item to Notion using the Publish Action Item tool. "
+        "Prefer batching multiple items into fewer tool calls if supported by the tool. "
+        "Do not skip any item; ensure every enriched action item from the risk scorer "
+        "is published."
     ),
     backstory=(
-        "You are meticulous and patient. You know that publishing 10 items means "
-        "making 10 tool calls — you do not batch, skip, or approximate. "
-        "Every item deserves its own page."
+        "You are meticulous and patient. Your job is reliable publishing: every action item "
+        "must become its own Notion page. If the publishing tool supports accepting a batch "
+        "of action items, use it to reduce overhead while preserving full fidelity."
     ),
-    llm=LLM,
+    llm=LLM_FLASH,
     tools=[_notion_tool],
     verbose=False,
 )

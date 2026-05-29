@@ -14,3 +14,16 @@ llm = LLM(
     max_retries=6,
     timeout=120,
 )
+
+# Gemini flash is lower-latency and is used for repetitive/pure-mapping steps
+# (e.g. Notion publishing orchestration).
+llm_flash = LLM(
+    model="gemini/gemini-2.5-flash",
+    api_key=os.getenv("GEMINI_API_KEY"),
+    is_litellm=True,
+    max_retries=6,
+    timeout=120,
+)
+
+# Keep the existing name for non-notion tasks.
+llm_pro = llm

@@ -14,7 +14,8 @@ Each pipeline run becomes one WORKFLOW span containing:
 import os
 
 
-_BASE_TAGS = ["meeting-agent", "notion", "gemini-2.5-pro", "crewai"]
+# Mixed-model workflow (pro for extraction/scoring, flash for Notion publishing).
+_BASE_TAGS = ["meeting-agent", "notion", "gemini-2.5-pro", "gemini-2.5-flash", "crewai"]
 
 
 def init(tags: list[str] | None = None) -> bool:

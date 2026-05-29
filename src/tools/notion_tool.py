@@ -1,5 +1,5 @@
 """
-NotionTool — publishes a single enriched action item to the Notion database.
+NotionTool — publishes enriched action items to the Notion database.
 
 Each page gets a rich structured body:
   📋 Assignment   — owner, deadline, priority, status
@@ -10,15 +10,17 @@ Each page gets a rich structured body:
 
 After all items are published, call create_sprint_summary() directly from
 crew.py to create the grouped owner summary page — keeping the LLM's task
-description simple so Groq doesn't generate preamble instead of tool calls.
+description simple so it doesn't generate preamble instead of tool calls.
 """
 
 import json
 import os
 import re
+import threading
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
-from typing import Type
+from typing import Any, Type
 
 from crewai.tools import BaseTool
 from notion_client import Client
@@ -27,15 +29,20 @@ from pydantic import BaseModel, Field
 # Module-level accumulator — populated by each _publish_item call so
 # crew.py can call create_sprint_summary() after kickoff completes.
 _session_items: list[dict] = []
+_session_items_lock = threading.Lock()
 
 
 def reset_session() -> None:
     """Clear accumulated items (call before each crew run)."""
-    _session_items.clear()
+    with _session_items_lock:
+        _session_items.clear()
 
 
 class NotionToolInput(BaseModel):
-    action_item_json: str = Field(
+    # Backward-compatible: callers may send either a single item JSON object
+    # or a full JSON array of items for batching.
+    action_item_json: str | None = Field(
+        default=None,
         description=(
             "JSON string for a single action item. Required fields: title (str). "
             "Optional: owner (str), deadline (str), priority (str), "
@@ -43,6 +50,14 @@ class NotionToolInput(BaseModel):
             "execution_order (int|str), dependencies (str), source_quote (str), "
             "notes (list[str] — extra context, concerns, or side remarks from the call)."
         )
+    )
+
+    action_items_json: str | None = Field(
+        default=None,
+        description=(
+            "JSON string for a JSON array of action items (batch mode). "
+            "Each item has the same schema as action_item_json."
+        ),
     )
 
 
@@ -93,22 +108,53 @@ class NotionTool(BaseTool):
         "Each page includes assignment details, risk analysis, execution order, "
         "dependencies, the source quote from the meeting, and any context/notes "
         "or side remarks mentioned during the call. "
-        "Input: JSON string with title plus optional metadata fields."
+        "Supports both single-item and batch (JSON array) publishing. "
+        "Input: JSON string for one item (action_item_json) or a JSON array "
+        "of items (action_items_json)."
     )
     args_schema: Type[BaseModel] = NotionToolInput
 
-    def _run(self, action_item_json: str) -> str:
-        data: dict = {}
-        try:
-            try:
-                data = json.loads(action_item_json)
-            except json.JSONDecodeError:
-                match = re.search(r"\{.*\}", action_item_json, re.DOTALL)
-                if match:
-                    data = json.loads(match.group())
-                else:
-                    return f"Error: Cannot parse JSON — {action_item_json[:200]}"
+    def _run(
+        self,
+        action_item_json: str | None = None,
+        action_items_json: str | None = None,
+    ) -> str:
+        """
+        Publish one or many action items.
 
+        CrewAI may call this tool multiple times (legacy behavior) or once with a
+        batched JSON array (new behavior).
+        """
+
+        def _parse_single_item(raw: str) -> dict[str, Any]:
+            try:
+                parsed = json.loads(raw)
+            except json.JSONDecodeError:
+                match = re.search(r"\{.*\}", raw, re.DOTALL)
+                if not match:
+                    raise ValueError(f"Cannot parse JSON object — {raw[:200]}")
+                parsed = json.loads(match.group())
+            if not isinstance(parsed, dict):
+                raise ValueError("Expected a JSON object for action_item_json.")
+            return parsed
+
+        def _parse_items_array(raw: str) -> list[dict[str, Any]]:
+            try:
+                parsed = json.loads(raw)
+            except json.JSONDecodeError:
+                match = re.search(r"\[.*\]", raw, re.DOTALL)
+                if not match:
+                    raise ValueError(f"Cannot parse JSON array — {raw[:200]}")
+                parsed = json.loads(match.group())
+
+            if isinstance(parsed, dict):
+                return [parsed]
+            if not isinstance(parsed, list):
+                raise ValueError("Expected a JSON array for action_items_json.")
+            # Ensure each element is a dict
+            return [p for p in parsed if isinstance(p, dict)]
+
+        def _build_children(data: dict[str, Any]) -> list[dict[str, Any]]:
             title = str(data.get("title", "Untitled Action Item")).strip()
             owner = str(data.get("owner", "Unassigned"))
             deadline = str(data.get("deadline", "TBD"))
@@ -121,13 +167,15 @@ class NotionTool(BaseTool):
             notes = data.get("notes", [])
 
             risk_label = (
-                "High Risk" if risk_score >= 70
-                else "Medium Risk" if risk_score >= 40
+                "High Risk"
+                if risk_score >= 70
+                else "Medium Risk"
+                if risk_score >= 40
                 else "Low Risk"
             )
             flags_str = ", ".join(risk_flags) if risk_flags else "None"
 
-            children = [
+            children: list[dict[str, Any]] = [
                 _h3("Assignment"),
                 _bullet(f"Owner: {owner}"),
                 _bullet(f"Deadline: {deadline}"),
@@ -152,27 +200,75 @@ class NotionTool(BaseTool):
                 for note in (notes if isinstance(notes, list) else [notes]):
                     children.append(_bullet(str(note)))
 
-            notion = Client(auth=os.environ["NOTION_TOKEN"])
-            database_id = os.environ["NOTION_DATABASE_ID"]
+            return children
 
-            page = notion.pages.create(
-                parent={"database_id": database_id},
-                properties={"Name": {"title": [_text(title)]}},
-                children=children,
-            )
-            page_id = page.get("id", "unknown")
+        # ── Parse inputs ─────────────────────────────────────────────────────
+        items: list[dict[str, Any]] = []
+        try:
+            if action_items_json:
+                items = _parse_items_array(action_items_json)
+            elif action_item_json:
+                items = [_parse_single_item(action_item_json)]
+            else:
+                return json.dumps(
+                    {"error": "No input provided. Provide action_item_json or action_items_json."}
+                )
 
-            # Accumulate for post-run sprint summary
-            _session_items.append(data)
-
-            return (
-                f"Published: '{title}' | Owner: {owner} | Deadline: {deadline} | "
-                f"Priority: {priority} | Risk: {risk_score}/100 | Page ID: {page_id}"
-            )
-
+            if not items:
+                return json.dumps({"error": "No items to publish (empty batch)."})
         except Exception as exc:
-            title = data.get("title", "?") if data else "?"
-            return f"Error publishing '{title}': {exc}"
+            return json.dumps({"error": f"Failed to parse tool input: {exc}"})
+
+        notion = Client(auth=os.environ["NOTION_TOKEN"])
+        database_id = os.environ["NOTION_DATABASE_ID"]
+        max_workers = int(os.getenv("NOTION_PUBLISH_WORKERS", "5"))
+
+        def _publish_one(data: dict[str, Any]) -> dict[str, Any]:
+            title = str(data.get("title", "Untitled Action Item")).strip()
+            try:
+                children = _build_children(data)
+                page = notion.pages.create(
+                    parent={"database_id": database_id},
+                    properties={"Name": {"title": [_text(title)]}},
+                    children=children,
+                )
+                page_id = page.get("id", "unknown")
+
+                # Accumulate for post-run sprint summary
+                with _session_items_lock:
+                    _session_items.append(data)
+
+                return {
+                    "title": title,
+                    "owner": data.get("owner", "Unassigned"),
+                    "priority": data.get("priority", "Medium"),
+                    "risk_score": data.get("risk_score", 0),
+                    "status": "OK",
+                    "page_id": page_id,
+                }
+            except Exception as exc:
+                return {
+                    "title": title,
+                    "status": "ERROR",
+                    "error": str(exc),
+                }
+
+        # ── Publish (threaded for speed, capped for rate-limits) ───────────
+        results: list[dict[str, Any]] = []
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            futures = {ex.submit(_publish_one, item): item for item in items}
+            for fut in as_completed(futures):
+                results.append(fut.result())
+
+        ok_count = sum(1 for r in results if r.get("status") == "OK")
+        return json.dumps(
+            {
+                "published_count": len(items),
+                "ok_count": ok_count,
+                "results": results,
+            },
+            indent=2,
+        )
 
 
 # ── Post-run sprint summary (called from crew.py) ─────────────────────────────

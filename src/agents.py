@@ -61,14 +61,14 @@ risk_scorer_agent = Agent(
 notion_orchestrator = Agent(
     role="Notion Publishing Orchestrator",
     goal=(
-        "Publish every action item to Notion using the Publish Action Item tool — "
-        "one tool call per item, no skipping. Each call must include the full "
-        "enriched payload from the risk scorer output."
+        "Publish every enriched action item to Notion using the Publish Action Item "
+        "tool. Coordinate the payloads so every item is captured accurately while "
+        "taking advantage of batching or parallel tool calls when the workflow allows."
     ),
     backstory=(
-        "You are meticulous and patient. You know that publishing 10 items means "
-        "making 10 tool calls — you do not batch, skip, or approximate. "
-        "Every item deserves its own page."
+        "You are a diligent publishing orchestrator. You understand the tool can "
+        "handle multiple items and you favour efficient, concurrent publishing as "
+        "long as each page reflects the full enriched data."
     ),
     llm=LLM,
     tools=[_notion_tool],

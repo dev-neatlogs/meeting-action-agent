@@ -64,7 +64,8 @@ def run(
     crew = Crew(
         agents=_AGENTS,
         tasks=tasks,
-        process=Process.sequential,
+        process=Process.hierarchical,
+        async_execution=True,
         verbose=verbose,
         step_callback=_step_throttle,
         task_callback=_task_done,

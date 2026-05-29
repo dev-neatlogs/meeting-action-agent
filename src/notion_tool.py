@@ -1,17 +1,27 @@
-import json
 import os
-from typing import Type
+from typing import List, Type
 
 from crewai.tools import BaseTool
 from notion_client import Client
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Extra, Field
+
+
+class ActionItem(BaseModel):
+    title: str = Field(default="Untitled Action Item")
+    owner: str = Field(default="Unassigned")
+    deadline: str = Field(default="TBD")
+    priority: str = Field(default="Medium")
+
+    class Config:
+        extra = Extra.allow
 
 
 class NotionToolInput(BaseModel):
-    action_item_json: str = Field(
+    action_items: List[ActionItem] = Field(
         description=(
-            "A JSON string with fields: title (str), owner (str), "
-            "deadline (str), priority (str)"
+            "A list of action item objects describing title (str), owner (str), "
+            "deadline (str), and priority (str). Additional fields are allowed and "
+            "passed through to Notion."
         )
     )
 
@@ -19,73 +29,71 @@ class NotionToolInput(BaseModel):
 class NotionTool(BaseTool):
     name: str = "notion_publisher"
     description: str = (
-        "Creates action item entries in a Notion database. "
-        "Input should be a JSON string with fields: "
-        "title (str), owner (str), deadline (str), priority (str)"
+        "Creates action item entries in a Notion database. The tool accepts a list "
+        "of action item objects and publishes each one—title (str), owner (str), "
+        "deadline (str), and priority (str) are normalized before persistence."
     )
     args_schema: Type[BaseModel] = NotionToolInput
 
-    def _run(self, action_item_json: str) -> str:
+    def _run(self, action_items: List[ActionItem]) -> str:
+        if not action_items:
+            return "No action items provided."
+
+        results = [self._publish_item(item) for item in action_items]
+        return "\n".join(results)
+
+    def _publish_item(self, item: ActionItem) -> str:
         try:
-            # Parse input
-            try:
-                data = json.loads(action_item_json)
-            except json.JSONDecodeError:
-                # Try to extract JSON substring if there's surrounding text
-                import re
-                match = re.search(r'\{.*\}', action_item_json, re.DOTALL)
-                if match:
-                    data = json.loads(match.group())
-                else:
-                    return f"Error: Could not parse JSON input: {action_item_json[:200]}"
+            title = item.title or "Untitled Action Item"
+            owner = item.owner or "Unassigned"
+            deadline = item.deadline or "TBD"
+            priority = item.priority or "Medium"
 
-            title = data.get("title", "Untitled Action Item")
-            owner = data.get("owner", "Unassigned")
-            deadline = data.get("deadline", "TBD")
-            priority = data.get("priority", "Medium")
-
-            # Normalise priority to valid select values
             priority_map = {"high": "High", "medium": "Medium", "low": "Low"}
             priority = priority_map.get(priority.lower(), "Medium")
 
             notion = Client(auth=os.environ["NOTION_TOKEN"])
             database_id = os.environ["NOTION_DATABASE_ID"]
 
-            # Build page body — owner/deadline/priority go into the page content
-            # so the tool works regardless of the database's column schema.
             children = [
                 {
                     "object": "block",
                     "type": "bulleted_list_item",
                     "bulleted_list_item": {
-                        "rich_text": [{"type": "text", "text": {"content": f"Owner: {owner}"}}]
+                        "rich_text": [
+                            {"type": "text", "text": {"content": f"Owner: {owner}"}}
+                        ]
                     },
                 },
                 {
                     "object": "block",
                     "type": "bulleted_list_item",
                     "bulleted_list_item": {
-                        "rich_text": [{"type": "text", "text": {"content": f"Deadline: {deadline}"}}]
+                        "rich_text": [
+                            {"type": "text", "text": {"content": f"Deadline: {deadline}"}}
+                        ]
                     },
                 },
                 {
                     "object": "block",
                     "type": "bulleted_list_item",
                     "bulleted_list_item": {
-                        "rich_text": [{"type": "text", "text": {"content": f"Priority: {priority}"}}]
+                        "rich_text": [
+                            {"type": "text", "text": {"content": f"Priority: {priority}"}}
+                        ]
                     },
                 },
                 {
                     "object": "block",
                     "type": "bulleted_list_item",
                     "bulleted_list_item": {
-                        "rich_text": [{"type": "text", "text": {"content": "Status: Not Started"}}]
+                        "rich_text": [
+                            {"type": "text", "text": {"content": "Status: Not Started"}}
+                        ]
                     },
                 },
             ]
 
-            # Build properties — only "Name" (title) is guaranteed to exist.
-            # Attempt optional properties but catch failures gracefully.
             properties: dict = {
                 "Name": {
                     "title": [{"type": "text", "text": {"content": title}}]
@@ -104,6 +112,5 @@ class NotionTool(BaseTool):
                 f"(owner: {owner}, deadline: {deadline}, priority: {priority}). "
                 f"Page ID: {page_id}"
             )
-
-        except Exception as e:
-            return f"Error creating Notion page: {str(e)}"
+        except Exception as exc:
+            return f"Error creating Notion page: {str(exc)}"

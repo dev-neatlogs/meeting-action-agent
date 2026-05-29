@@ -5,6 +5,7 @@ from crewai import Crew, Process
 from src.agents import meeting_analyst, risk_scorer_agent, notion_orchestrator
 from src.tasks import build_tasks
 from src.tools import create_sprint_summary, reset_session
+from src.config import llm_flash
 
 _AGENTS = [
     meeting_analyst,
@@ -64,7 +65,10 @@ def run(
     crew = Crew(
         agents=_AGENTS,
         tasks=tasks,
-        process=Process.sequential,
+        # Use hierarchical process to allow CrewAI to execute compatible tasks
+        # with less rigid scheduling than pure sequential mode.
+        process=Process.hierarchical,
+        manager_llm=llm_flash,
         verbose=verbose,
         step_callback=_step_throttle,
         task_callback=_task_done,

@@ -57,8 +57,9 @@ def build_tasks(transcript: str) -> list[Task]:
     publish_to_notion = Task(
         description=(
             "Publish every action item from the PUBLISH-READY JSON to Notion.\n\n"
-            "For EACH item in the JSON array, call the Publish Action Item tool ONCE "
-            "with the full item payload. Do NOT skip any item.\n\n"
+            "Call the Publish Action Item tool to publish ALL items. "
+            "Prefer calling the tool ONCE with a full JSON array of items if the tool "
+            "supports batching. Do NOT skip any item.\n\n"
             "After all items are published, return a PUBLISH SUMMARY:\n"
             "- Total items published\n"
             "- Each item: title | owner | priority | risk_score | status\n"

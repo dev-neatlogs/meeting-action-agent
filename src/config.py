@@ -8,7 +8,7 @@ litellm.drop_params = True
 litellm.retry_after = True
 
 llm = LLM(
-    model="gemini/gemini-2.5-pro",
+    model="gemini/gemini-2.5-flash",
     api_key=os.getenv("GEMINI_API_KEY"),
     is_litellm=True,  # Force LiteLLM routing so Neatlogs instruments LLM calls + costs
     max_retries=6,

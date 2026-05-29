@@ -103,28 +103,25 @@ Let's close this out.
 
 def _patch_notion_tool():
     """
-    Monkey-patch NotionTool._run to simulate a Notion API 429 error on the
-    4th publish call. The tool's own error handler catches it and returns an
-    error string — the orchestrator receives this, takes no retry action,
-    and the item is silently missing from Notion.
+    Monkey-patch NotionTool._publish_item to simulate a 429 error on the
+    4th publish attempt so the orchestrator can surface partial publish drops.
     """
     from src.tools.notion_tool import NotionTool
 
-    original_run = NotionTool._run
+    original_publish = NotionTool._publish_item
     call_counter = [0]
 
-    def _patched_run(self, action_item_json: str) -> str:
+    def _patched_publish(self, item):
         call_counter[0] += 1
         if call_counter[0] == 4:
-            # Simulate Notion rate-limit / transient API error
             raise Exception(
                 "notion_client.errors.APIResponseError: Request to Notion API failed "
                 "with status 429 — rate_limited: The user or workspace is rate limited. "
                 "Retry-After: 32"
             )
-        return original_run(self, action_item_json)
+        return original_publish(self, item)
 
-    NotionTool._run = _patched_run
+    NotionTool._publish_item = _patched_publish
 
 
 _patch_notion_tool()

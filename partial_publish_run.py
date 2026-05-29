@@ -3,13 +3,13 @@
 Partial publish debug run.
 
 8 action items scored — only 7 published.
-The 4th notion_publisher call (a Critical security item) fails with a
-simulated Notion API rate-limit error. The orchestrator receives the
-error string, logs no retry, and moves on.
+Publishing uses a batch Notion tool call. The 4th item in that batch
+raises a simulated Notion API rate-limit error, causing only items 1-3
+to be created before the tool returns its error string.
 
 What the trace surfaces:
   - risk_scorer:        8 items enriched, 1 flagged SECURITY_SENSITIVE + Critical
-  - notion_publisher:   8 tool calls visible, call #4 returns an error string
+  - Publish Action Items: 1 tool call (batch) with an injected failure during item #4
   - sprint_summary:     7 items (the Critical item is missing — no one noticed)
 
 Debug question: "Risk scorer shows 8 items, sprint summary shows 7.
@@ -99,32 +99,112 @@ Let's close this out.
 """}
 
 
-# ── Inject failure on call #4 ──────────────────────────────────────────────────
+# ── Inject failure on item #4 ──────────────────────────────────────────────────
 
 def _patch_notion_tool():
     """
-    Monkey-patch NotionTool._run to simulate a Notion API 429 error on the
-    4th publish call. The tool's own error handler catches it and returns an
-    error string — the orchestrator receives this, takes no retry action,
-    and the item is silently missing from Notion.
+    Monkey-patch NotionBatchTool._run to simulate a Notion API 429 error
+    on the 4th item inside the batch. Items 1-3 will be created, then the
+    tool fails and returns an error string.
     """
-    from src.tools.notion_tool import NotionTool
+    import json
+    import re
+    from src.tools import notion_tool as nt
+    from notion_client import Client
 
-    original_run = NotionTool._run
-    call_counter = [0]
+    def _patched_run(self, items_json: str) -> str:
+        try:
+            import os
+            # Parse — mirror NotionBatchTool behavior (tolerate wrapping text)
+            try:
+                parsed = json.loads(items_json)
+            except json.JSONDecodeError:
+                match = re.search(r"\[.*\]|\{.*\}", items_json, re.DOTALL)
+                if match:
+                    parsed = json.loads(match.group())
+                else:
+                    return "Error: Cannot parse items_json as JSON."
 
-    def _patched_run(self, action_item_json: str) -> str:
-        call_counter[0] += 1
-        if call_counter[0] == 4:
-            # Simulate Notion rate-limit / transient API error
-            raise Exception(
-                "notion_client.errors.APIResponseError: Request to Notion API failed "
-                "with status 429 — rate_limited: The user or workspace is rate limited. "
-                "Retry-After: 32"
-            )
-        return original_run(self, action_item_json)
+            if isinstance(parsed, list):
+                items = parsed
+            elif isinstance(parsed, dict):
+                items = [parsed]
+            else:
+                return "Error: items_json must be a JSON array or object."
 
-    NotionTool._run = _patched_run
+            notion = Client(auth=os.environ["NOTION_TOKEN"])
+            database_id = os.environ["NOTION_DATABASE_ID"]
+
+            published_lines: list[str] = []
+            for idx, data in enumerate(items):
+                if idx == 3:
+                    raise Exception(
+                        "notion_client.errors.APIResponseError: Request to Notion API failed "
+                        "with status 429 — rate_limited: The user or workspace is rate limited. "
+                        "Retry-After: 32"
+                    )
+
+                title = str(data.get("title", "Untitled Action Item")).strip()
+                owner = str(data.get("owner", "Unassigned"))
+                deadline = str(data.get("deadline", "TBD"))
+                priority = str(data.get("priority", "Medium")).strip()
+                risk_score = int(data.get("risk_score", 0))
+                risk_flags = data.get("risk_flags", [])
+                execution_order = data.get("execution_order", "—")
+                dependencies = str(data.get("dependencies", "None"))
+                source_quote = str(data.get("source_quote", ""))
+                notes = data.get("notes", [])
+
+                risk_label = (
+                    "High Risk" if risk_score >= 70
+                    else "Medium Risk" if risk_score >= 40
+                    else "Low Risk"
+                )
+                flags_str = ", ".join(risk_flags) if risk_flags else "None"
+
+                children = [
+                    nt._h3("Assignment"),
+                    nt._bullet(f"Owner: {owner}"),
+                    nt._bullet(f"Deadline: {deadline}"),
+                    nt._bullet(f"Priority: {priority}"),
+                    nt._bullet("Status: Not Started"),
+                    nt._divider(),
+                    nt._h3("Risk Analysis"),
+                    nt._bullet(f"Risk Score: {risk_score}/100  ({risk_label})"),
+                    nt._bullet(f"Flags: {flags_str}"),
+                    nt._divider(),
+                    nt._h3("Execution"),
+                    nt._bullet(f"Execution Order: #{execution_order}"),
+                    nt._bullet(f"Dependencies: {dependencies}"),
+                ]
+
+                if source_quote:
+                    children += [nt._divider(), nt._h3("Source Quote"), nt._quote(source_quote)]
+
+                if notes:
+                    children.append(nt._divider())
+                    children.append(nt._h3("Context & Notes"))
+                    for note in (notes if isinstance(notes, list) else [notes]):
+                        children.append(nt._bullet(str(note)))
+
+                page = notion.pages.create(
+                    parent={"database_id": database_id},
+                    properties={"Name": {"title": [nt._text(title)]}},
+                    children=children,
+                )
+                page_id = page.get("id", "unknown")
+
+                nt._session_items.append(data)
+                published_lines.append(
+                    f"Published: '{title}' | Owner: {owner} | Deadline: {deadline} | "
+                    f"Priority: {priority} | Risk: {risk_score}/100 | Page ID: {page_id}"
+                )
+
+            return "\n".join(published_lines)
+        except Exception as exc:
+            return f"Error batch publishing: {exc}"
+
+    nt.NotionBatchTool._run = _patched_run
 
 
 _patch_notion_tool()

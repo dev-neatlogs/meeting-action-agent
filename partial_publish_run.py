@@ -103,28 +103,89 @@ Let's close this out.
 
 def _patch_notion_tool():
     """
-    Monkey-patch NotionTool._run to simulate a Notion API 429 error on the
-    4th publish call. The tool's own error handler catches it and returns an
-    error string — the orchestrator receives this, takes no retry action,
-    and the item is silently missing from Notion.
+    Monkey-patch NotionBulkTool._run to simulate a Notion API 429 error on the
+    4th item within a single bulk publishing call.
+
+    The bulk tool must still:
+      - publish the other items
+      - report per-item SUCCESS/FAILED
+      - feed only successful items into sprint summary
     """
-    from src.tools.notion_tool import NotionTool
+    import json
+    import os
+    import threading as _threading  # noqa: F401 (keeps existing import shape)
+    from notion_client import Client
 
-    original_run = NotionTool._run
-    call_counter = [0]
+    import src.tools.notion_tool as notion_mod
 
-    def _patched_run(self, action_item_json: str) -> str:
-        call_counter[0] += 1
-        if call_counter[0] == 4:
-            # Simulate Notion rate-limit / transient API error
-            raise Exception(
-                "notion_client.errors.APIResponseError: Request to Notion API failed "
-                "with status 429 — rate_limited: The user or workspace is rate limited. "
-                "Retry-After: 32"
-            )
-        return original_run(self, action_item_json)
+    NotionBulkTool = notion_mod.NotionBulkTool
+    _parse_items_json = notion_mod._parse_items_json
+    _build_children_for_item = notion_mod._build_children_for_item
 
-    NotionTool._run = _patched_run
+    def _patched_run(self, items_json: str) -> str:
+        items = _parse_items_json(items_json)
+
+        notion = Client(auth=os.environ["NOTION_TOKEN"])
+        database_id = os.environ["NOTION_DATABASE_ID"]
+
+        results: list[dict] = []
+        success_count = 0
+
+        for idx, item in enumerate(items, start=1):
+            try:
+                if idx == 4:
+                    raise Exception(
+                        "notion_client.errors.APIResponseError: Request to Notion API failed "
+                        "with status 429 — rate_limited: The user or workspace is rate limited. "
+                        "Retry-After: 32"
+                    )
+
+                children, normalized_item = _build_children_for_item(item)
+                page = notion.pages.create(
+                    parent={"database_id": database_id},
+                    properties={"Name": {"title": [notion_mod._text(normalized_item.get("title", "Untitled"))]}},
+                    children=children,
+                )
+                page_id = page.get("id", "unknown")
+
+                notion_mod._session_items.append(normalized_item)
+                success_count += 1
+
+                results.append(
+                    {
+                        "status": "SUCCESS",
+                        "page_id": page_id,
+                        "id": normalized_item.get("id"),
+                        "title": normalized_item.get("title"),
+                        "owner": normalized_item.get("owner"),
+                        "priority": normalized_item.get("priority"),
+                        "risk_score": normalized_item.get("risk_score"),
+                    }
+                )
+            except Exception as exc:
+                title = str(item.get("title", "Untitled Action Item")).strip()
+                owner = str(item.get("owner", "Unassigned"))
+                results.append(
+                    {
+                        "status": "FAILED",
+                        "error": str(exc),
+                        "id": item.get("id"),
+                        "title": title,
+                        "owner": owner,
+                        "priority": item.get("priority"),
+                        "risk_score": item.get("risk_score"),
+                    }
+                )
+
+        return json.dumps(
+            {
+                "counts": {"success": success_count, "failed": len(results) - success_count},
+                "results": results,
+            },
+            indent=2,
+        )
+
+    NotionBulkTool._run = _patched_run
 
 
 _patch_notion_tool()

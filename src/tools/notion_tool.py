@@ -1,5 +1,9 @@
 """
-NotionTool — publishes a single enriched action item to the Notion database.
+NotionTool — publishes enriched action items to a Notion database.
+
+This module includes:
+  - NotionTool: publishes a single action item (legacy / single-item call)
+  - NotionBulkTool: publishes many action items in one tool call (preferred)
 
 Each page gets a rich structured body:
   📋 Assignment   — owner, deadline, priority, status
@@ -44,6 +48,115 @@ class NotionToolInput(BaseModel):
             "notes (list[str] — extra context, concerns, or side remarks from the call)."
         )
     )
+
+
+class NotionBulkToolInput(BaseModel):
+    items_json: str = Field(
+        description=(
+            "JSON string for a JSON array of action items. "
+            "Each element is a single action item object with the same fields accepted by "
+            "Publish Action Item: title, owner, deadline, priority, risk_score, risk_flags, "
+            "execution_order, dependencies, source_quote, notes."
+        )
+    )
+
+
+def _parse_items_json(items_json: str) -> list[dict]:
+    """
+    Best-effort parse for "items_json" which is expected to be a JSON array,
+    but may be wrapped in extra text.
+    """
+    try:
+        parsed = json.loads(items_json)
+    except json.JSONDecodeError:
+        match = re.search(r"\[.*\]", items_json, re.DOTALL)
+        if not match:
+            raise ValueError(f"Cannot parse JSON array — {items_json[:200]}")
+        parsed = json.loads(match.group())
+
+    if isinstance(parsed, dict):
+        return [parsed]
+    if not isinstance(parsed, list):
+        raise ValueError("items_json must be a JSON array (or an object).")
+    # Ensure dict elements (best-effort)
+    out: list[dict] = []
+    for el in parsed:
+        if isinstance(el, dict):
+            out.append(el)
+        else:
+            out.append({"title": str(el)})
+    return out
+
+
+def _build_children_for_item(data: dict) -> tuple[list[dict], dict]:
+    """
+    Build Notion page children blocks for one action item.
+    Returns (children, normalized_item) so the bulk tool can store the same
+    canonical fields into _session_items for sprint summary.
+    """
+    title = str(data.get("title", "Untitled Action Item")).strip()
+    owner = str(data.get("owner", "Unassigned"))
+    deadline = str(data.get("deadline", "TBD"))
+    priority = str(data.get("priority", "Medium")).strip()
+    risk_score = int(data.get("risk_score", 0))
+    risk_flags = data.get("risk_flags", [])
+    if not isinstance(risk_flags, list):
+        risk_flags = [str(risk_flags)]
+    execution_order = data.get("execution_order", "—")
+    dependencies = str(data.get("dependencies", "None"))
+    source_quote = str(data.get("source_quote", ""))
+    notes = data.get("notes", [])
+    if isinstance(notes, (str, int, float)):
+        notes = [str(notes)]
+
+    risk_label = (
+        "High Risk" if risk_score >= 70
+        else "Medium Risk" if risk_score >= 40
+        else "Low Risk"
+    )
+    flags_str = ", ".join(risk_flags) if risk_flags else "None"
+
+    children: list[dict] = [
+        _h3("Assignment"),
+        _bullet(f"Owner: {owner}"),
+        _bullet(f"Deadline: {deadline}"),
+        _bullet(f"Priority: {priority}"),
+        _bullet("Status: Not Started"),
+        _divider(),
+        _h3("Risk Analysis"),
+        _bullet(f"Risk Score: {risk_score}/100  ({risk_label})"),
+        _bullet(f"Flags: {flags_str}"),
+        _divider(),
+        _h3("Execution"),
+        _bullet(f"Execution Order: #{execution_order}"),
+        _bullet(f"Dependencies: {dependencies}"),
+    ]
+
+    if source_quote:
+        children += [_divider(), _h3("Source Quote"), _quote(source_quote)]
+
+    if notes:
+        children.append(_divider())
+        children.append(_h3("Context & Notes"))
+        for note in (notes if isinstance(notes, list) else [notes]):
+            children.append(_bullet(str(note)))
+
+    normalized_item = dict(data)
+    normalized_item.update(
+        {
+            "title": title,
+            "owner": owner,
+            "deadline": deadline,
+            "priority": priority,
+            "risk_score": risk_score,
+            "risk_flags": risk_flags,
+            "execution_order": execution_order,
+            "dependencies": dependencies,
+            "source_quote": source_quote,
+            "notes": notes,
+        }
+    )
+    return children, normalized_item
 
 
 # ── Block helpers ──────────────────────────────────────────────────────────────
@@ -173,6 +286,81 @@ class NotionTool(BaseTool):
         except Exception as exc:
             title = data.get("title", "?") if data else "?"
             return f"Error publishing '{title}': {exc}"
+
+
+class NotionBulkTool(BaseTool):
+    """
+    Bulk variant of the Notion publisher tool.
+
+    CrewAI orchestrator can call this ONCE with the full action-item JSON array,
+    which collapses the LLM→tool loop from "N separate tool calls" to "1 tool call".
+    """
+
+    name: str = "Publish Action Items"
+    description: str = (
+        "Creates richly formatted action item pages in a Notion database. "
+        "Call ONCE with items_json (JSON array of action item objects). "
+        "The tool publishes each page and returns per-item success/failure."
+    )
+    args_schema: Type[BaseModel] = NotionBulkToolInput
+
+    def _run(self, items_json: str) -> str:
+        items: list[dict] = _parse_items_json(items_json)
+
+        notion = Client(auth=os.environ["NOTION_TOKEN"])
+        database_id = os.environ["NOTION_DATABASE_ID"]
+
+        results: list[dict] = []
+        success_count = 0
+
+        for item in items:
+            # We store canonical fields only for successful creates.
+            try:
+                children, normalized_item = _build_children_for_item(item)
+
+                page = notion.pages.create(
+                    parent={"database_id": database_id},
+                    properties={"Name": {"title": [_text(normalized_item.get("title", "Untitled"))]}},
+                    children=children,
+                )
+                page_id = page.get("id", "unknown")
+
+                _session_items.append(normalized_item)
+                success_count += 1
+
+                results.append(
+                    {
+                        "status": "SUCCESS",
+                        "page_id": page_id,
+                        "id": normalized_item.get("id"),
+                        "title": normalized_item.get("title"),
+                        "owner": normalized_item.get("owner"),
+                        "priority": normalized_item.get("priority"),
+                        "risk_score": normalized_item.get("risk_score"),
+                    }
+                )
+            except Exception as exc:
+                title = str(item.get("title", "Untitled Action Item")).strip()
+                owner = str(item.get("owner", "Unassigned"))
+                results.append(
+                    {
+                        "status": "FAILED",
+                        "error": str(exc),
+                        "id": item.get("id"),
+                        "title": title,
+                        "owner": owner,
+                        "priority": item.get("priority"),
+                        "risk_score": item.get("risk_score"),
+                    }
+                )
+
+        return json.dumps(
+            {
+                "counts": {"success": success_count, "failed": len(results) - success_count},
+                "results": results,
+            },
+            indent=2,
+        )
 
 
 # ── Post-run sprint summary (called from crew.py) ─────────────────────────────

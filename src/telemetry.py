@@ -14,7 +14,7 @@ Each pipeline run becomes one WORKFLOW span containing:
 import os
 
 
-_BASE_TAGS = ["meeting-agent", "notion", "gemini-2.5-pro", "crewai"]
+_BASE_TAGS = ["meeting-agent", "notion", "gemini-2.5-pro", "gemini-2.5-flash", "crewai"]
 
 
 def init(tags: list[str] | None = None) -> bool:

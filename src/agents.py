@@ -8,14 +8,14 @@ Three-agent pipeline.
 Trace topology:
   meeting_analyst     → 1-2 LLM calls
   risk_scorer_agent   → 1 LLM call + 1 tool call (risk_scorer)
-  notion_orchestrator → 1 LLM call + N tool calls (notion_publisher, one per item)
+  notion_orchestrator → 1 LLM call + 1 tool call (bulk Notion publishing)
 """
 
 from crewai import Agent
-from src.config import llm as LLM
-from src.tools import NotionTool, RiskScorerTool
+from src.config import llm_pro as LLM_PRO, llm_flash as LLM_FLASH
+from src.tools import NotionBulkTool, RiskScorerTool
 
-_notion_tool = NotionTool()
+_notion_bulk_tool = NotionBulkTool()
 _risk_tool = RiskScorerTool()
 
 
@@ -33,7 +33,7 @@ meeting_analyst = Agent(
         "delegation, the optimistic deadline that has 'slip' written all over it. "
         "Your structured output feeds directly into the risk scorer."
     ),
-    llm=LLM,
+    llm=LLM_PRO,
     verbose=False,
 )
 
@@ -52,7 +52,7 @@ risk_scorer_agent = Agent(
         "every item through each detection pass and produce clean structured output "
         "that the publisher can use directly."
     ),
-    llm=LLM,
+    llm=LLM_PRO,
     tools=[_risk_tool],
     verbose=False,
 )
@@ -61,16 +61,17 @@ risk_scorer_agent = Agent(
 notion_orchestrator = Agent(
     role="Notion Publishing Orchestrator",
     goal=(
-        "Publish every action item to Notion using the Publish Action Item tool — "
-        "one tool call per item, no skipping. Each call must include the full "
-        "enriched payload from the risk scorer output."
+        "Publish all action items to Notion using the Publish Action Items tool. "
+        "Prefer a single batched tool call with the full JSON array when supported. "
+        "Ensure every item from the PUBLISH-READY JSON is represented in the final "
+        "PUBLISH SUMMARY (SUCCESS/FAILED per item)."
     ),
     backstory=(
-        "You are meticulous and patient. You know that publishing 10 items means "
-        "making 10 tool calls — you do not batch, skip, or approximate. "
-        "Every item deserves its own page."
+        "You are meticulous and patient. Your job is to publish each action item to Notion "
+        "reliably and accurately. When the tool supports batching, you publish all items "
+        "in one tool call; if any item fails, you report it in the PUBLISH SUMMARY."
     ),
-    llm=LLM,
-    tools=[_notion_tool],
+    llm=LLM_FLASH,
+    tools=[_notion_bulk_tool],
     verbose=False,
 )

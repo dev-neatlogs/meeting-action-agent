@@ -4,15 +4,33 @@ Three sequential tasks — one per agent.
 
 from crewai import Task
 from src.agents import meeting_analyst, risk_scorer_agent, notion_orchestrator
+from src.config import TRANSCRIPT_MAX_CHARS
 
 
 def build_tasks(transcript: str) -> list[Task]:
+    # Truncating prevents very large prompts from causing extreme model latency.
+    # For action-item extraction, most actionable details appear early, while
+    # the tail often contains final commitments and risk/security notes.
+    def _truncate_text(text: str, max_chars: int) -> str:
+        if max_chars <= 0 or len(text) <= max_chars:
+            return text
+        head_len = int(max_chars * 0.7)
+        tail_len = max_chars - head_len
+        head = text[:head_len].rstrip()
+        tail = text[-tail_len:].lstrip()
+        return (
+            f"{head}\n\n"
+            "[TRUNCATED: transcript shortened for performance]\n\n"
+            f"{tail}"
+        )
+
+    transcript_for_llm = _truncate_text(transcript, TRANSCRIPT_MAX_CHARS)
 
     # ── Task 1: Extract action items ──────────────────────────────────────────
     extract_actions = Task(
         description=(
             "Analyse this meeting transcript and extract every action item.\n\n"
-            f"TRANSCRIPT:\n{transcript}\n\n"
+            f"TRANSCRIPT (may be truncated):\n{transcript_for_llm}\n\n"
             "Output TWO sections:\n\n"
             "SECTION 1 — MEETING SUMMARY\n"
             "Meeting type, participants (name + role), and key decisions made.\n\n"

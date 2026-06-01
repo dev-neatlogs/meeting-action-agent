@@ -5,6 +5,7 @@ from crewai import Crew, Process
 from src.agents import meeting_analyst, risk_scorer_agent, notion_orchestrator
 from src.tasks import build_tasks
 from src.tools import create_sprint_summary, reset_session
+from src.config import llm_fast, llm_slow, FAST_MODEL_WORD_THRESHOLD
 
 _AGENTS = [
     meeting_analyst,
@@ -36,6 +37,18 @@ def run(
         (result_str, summary_str) — pipeline final output + sprint summary status
     """
     reset_session()
+
+    # Model routing: large transcripts tend to create extreme prompt token
+    # counts, which can lead to large tail latencies on some providers/models.
+    # We switch to a faster model when the input is large.
+    transcript_words = len(transcript.split())
+    use_fast = transcript_words >= FAST_MODEL_WORD_THRESHOLD
+    if use_fast:
+        meeting_analyst.llm = llm_fast
+        risk_scorer_agent.llm = llm_fast
+    else:
+        meeting_analyst.llm = llm_slow
+        risk_scorer_agent.llm = llm_slow
 
     # Wrap the inner kickoff in a WORKFLOW span so every LLM call is a child
     @_traced_run

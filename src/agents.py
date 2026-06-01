@@ -12,7 +12,7 @@ Trace topology:
 """
 
 from crewai import Agent
-from src.config import llm as LLM
+from src.config import llm_slow as LLM
 from src.tools import NotionTool, RiskScorerTool
 
 _notion_tool = NotionTool()

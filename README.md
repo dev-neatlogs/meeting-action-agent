@@ -39,6 +39,14 @@ To get these:
 - **NOTION_TOKEN**: Create an integration at [notion.so/my-integrations](https://www.notion.so/my-integrations), then share your database with it
 - **NOTION_DATABASE_ID**: The 32-character ID from your Notion database URL
 
+### SendGrid operational verification
+
+If the support-copilot email workflow reports a SendGrid authentication failure,
+use `scripts/verify_sendgrid_credentials.py` to confirm that the rotated
+`SENDGRID_API_KEY` can call the Mail Send API. See
+[`docs/sendgrid-credential-rotation.md`](docs/sendgrid-credential-rotation.md)
+for the rotation, verification, and rollback runbook.
+
 ## Usage
 
 ### Demo mode (built-in sample transcript)

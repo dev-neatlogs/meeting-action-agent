@@ -1,5 +1,8 @@
 """
-NotionTool — publishes a single enriched action item to the Notion database.
+NotionTool — publishes enriched action items to the Notion database.
+
+Accepts a single item (object) or a batch (array). Batch publishes run in
+parallel to reduce end-to-end latency.
 
 Each page gets a rich structured body:
   📋 Assignment   — owner, deadline, priority, status
@@ -17,6 +20,7 @@ import json
 import os
 import re
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from typing import Type
 
@@ -28,6 +32,8 @@ from pydantic import BaseModel, Field
 # crew.py can call create_sprint_summary() after kickoff completes.
 _session_items: list[dict] = []
 
+_MAX_PARALLEL_PUBLISHES = 5
+
 
 def reset_session() -> None:
     """Clear accumulated items (call before each crew run)."""
@@ -35,13 +41,11 @@ def reset_session() -> None:
 
 
 class NotionToolInput(BaseModel):
-    action_item_json: str = Field(
+    action_items_json: str = Field(
         description=(
-            "JSON string for a single action item. Required fields: title (str). "
-            "Optional: owner (str), deadline (str), priority (str), "
-            "risk_score (int), risk_flags (list[str]), "
-            "execution_order (int|str), dependencies (str), source_quote (str), "
-            "notes (list[str] — extra context, concerns, or side remarks from the call)."
+            "JSON string for one action item (object) or many (array). "
+            "Each item must include title (str). Optional: owner, deadline, priority, "
+            "risk_score, risk_flags, execution_order, dependencies, source_quote, notes."
         )
     )
 
@@ -84,95 +88,132 @@ def _divider() -> dict:
     return {"object": "block", "type": "divider", "divider": {}}
 
 
+def _parse_items_json(raw: str) -> list[dict]:
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        match = re.search(r"(\[.*\]|\{.*\})", raw, re.DOTALL)
+        if not match:
+            raise ValueError(f"Cannot parse JSON — {raw[:200]}")
+        parsed = json.loads(match.group())
+
+    if isinstance(parsed, list):
+        return parsed
+    if isinstance(parsed, dict):
+        return [parsed]
+    raise ValueError(f"Expected object or array, got {type(parsed).__name__}")
+
+
+def _publish_item(data: dict) -> str:
+    title = str(data.get("title", "Untitled Action Item")).strip()
+    owner = str(data.get("owner", "Unassigned"))
+    deadline = str(data.get("deadline", "TBD"))
+    priority = str(data.get("priority", "Medium")).strip()
+    risk_score = int(data.get("risk_score", 0))
+    risk_flags = data.get("risk_flags", [])
+    execution_order = data.get("execution_order", "—")
+    dependencies = str(data.get("dependencies", "None"))
+    source_quote = str(data.get("source_quote", ""))
+    notes = data.get("notes", [])
+
+    risk_label = (
+        "High Risk" if risk_score >= 70
+        else "Medium Risk" if risk_score >= 40
+        else "Low Risk"
+    )
+    flags_str = ", ".join(risk_flags) if risk_flags else "None"
+
+    children = [
+        _h3("Assignment"),
+        _bullet(f"Owner: {owner}"),
+        _bullet(f"Deadline: {deadline}"),
+        _bullet(f"Priority: {priority}"),
+        _bullet("Status: Not Started"),
+        _divider(),
+        _h3("Risk Analysis"),
+        _bullet(f"Risk Score: {risk_score}/100  ({risk_label})"),
+        _bullet(f"Flags: {flags_str}"),
+        _divider(),
+        _h3("Execution"),
+        _bullet(f"Execution Order: #{execution_order}"),
+        _bullet(f"Dependencies: {dependencies}"),
+    ]
+
+    if source_quote:
+        children += [_divider(), _h3("Source Quote"), _quote(source_quote)]
+
+    if notes:
+        children.append(_divider())
+        children.append(_h3("Context & Notes"))
+        for note in (notes if isinstance(notes, list) else [notes]):
+            children.append(_bullet(str(note)))
+
+    notion = Client(auth=os.environ["NOTION_TOKEN"])
+    database_id = os.environ["NOTION_DATABASE_ID"]
+
+    page = notion.pages.create(
+        parent={"database_id": database_id},
+        properties={"Name": {"title": [_text(title)]}},
+        children=children,
+    )
+    page_id = page.get("id", "unknown")
+
+    _session_items.append(data)
+
+    return (
+        f"Published: '{title}' | Owner: {owner} | Deadline: {deadline} | "
+        f"Priority: {priority} | Risk: {risk_score}/100 | Page ID: {page_id}"
+    )
+
+
 # ── Tool ───────────────────────────────────────────────────────────────────────
 
 class NotionTool(BaseTool):
     name: str = "Publish Action Item"
     description: str = (
-        "Creates a richly formatted action item page in the Notion database. "
+        "Creates richly formatted action item pages in the Notion database. "
+        "Pass a JSON object for one item or a JSON array to publish all items in one call. "
         "Each page includes assignment details, risk analysis, execution order, "
-        "dependencies, the source quote from the meeting, and any context/notes "
-        "or side remarks mentioned during the call. "
-        "Input: JSON string with title plus optional metadata fields."
+        "dependencies, the source quote from the meeting, and any context/notes."
     )
     args_schema: Type[BaseModel] = NotionToolInput
 
-    def _run(self, action_item_json: str) -> str:
-        data: dict = {}
+    def _run(self, action_items_json: str) -> str:
         try:
+            items = _parse_items_json(action_items_json)
+        except (json.JSONDecodeError, ValueError) as exc:
+            return f"Error: {exc}"
+
+        if not items:
+            return "Error: No action items provided."
+
+        if len(items) == 1:
             try:
-                data = json.loads(action_item_json)
-            except json.JSONDecodeError:
-                match = re.search(r"\{.*\}", action_item_json, re.DOTALL)
-                if match:
-                    data = json.loads(match.group())
-                else:
-                    return f"Error: Cannot parse JSON — {action_item_json[:200]}"
+                return _publish_item(items[0])
+            except Exception as exc:
+                title = items[0].get("title", "?")
+                return f"Error publishing '{title}': {exc}"
 
-            title = str(data.get("title", "Untitled Action Item")).strip()
-            owner = str(data.get("owner", "Unassigned"))
-            deadline = str(data.get("deadline", "TBD"))
-            priority = str(data.get("priority", "Medium")).strip()
-            risk_score = int(data.get("risk_score", 0))
-            risk_flags = data.get("risk_flags", [])
-            execution_order = data.get("execution_order", "—")
-            dependencies = str(data.get("dependencies", "None"))
-            source_quote = str(data.get("source_quote", ""))
-            notes = data.get("notes", [])
+        results: list[str] = []
+        errors: list[str] = []
+        workers = min(_MAX_PARALLEL_PUBLISHES, len(items))
 
-            risk_label = (
-                "High Risk" if risk_score >= 70
-                else "Medium Risk" if risk_score >= 40
-                else "Low Risk"
-            )
-            flags_str = ", ".join(risk_flags) if risk_flags else "None"
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {pool.submit(_publish_item, item): item for item in items}
+            for future in as_completed(futures):
+                item = futures[future]
+                title = item.get("title", "?")
+                try:
+                    results.append(future.result())
+                except Exception as exc:
+                    errors.append(f"Error publishing '{title}': {exc}")
 
-            children = [
-                _h3("Assignment"),
-                _bullet(f"Owner: {owner}"),
-                _bullet(f"Deadline: {deadline}"),
-                _bullet(f"Priority: {priority}"),
-                _bullet("Status: Not Started"),
-                _divider(),
-                _h3("Risk Analysis"),
-                _bullet(f"Risk Score: {risk_score}/100  ({risk_label})"),
-                _bullet(f"Flags: {flags_str}"),
-                _divider(),
-                _h3("Execution"),
-                _bullet(f"Execution Order: #{execution_order}"),
-                _bullet(f"Dependencies: {dependencies}"),
-            ]
-
-            if source_quote:
-                children += [_divider(), _h3("Source Quote"), _quote(source_quote)]
-
-            if notes:
-                children.append(_divider())
-                children.append(_h3("Context & Notes"))
-                for note in (notes if isinstance(notes, list) else [notes]):
-                    children.append(_bullet(str(note)))
-
-            notion = Client(auth=os.environ["NOTION_TOKEN"])
-            database_id = os.environ["NOTION_DATABASE_ID"]
-
-            page = notion.pages.create(
-                parent={"database_id": database_id},
-                properties={"Name": {"title": [_text(title)]}},
-                children=children,
-            )
-            page_id = page.get("id", "unknown")
-
-            # Accumulate for post-run sprint summary
-            _session_items.append(data)
-
-            return (
-                f"Published: '{title}' | Owner: {owner} | Deadline: {deadline} | "
-                f"Priority: {priority} | Risk: {risk_score}/100 | Page ID: {page_id}"
-            )
-
-        except Exception as exc:
-            title = data.get("title", "?") if data else "?"
-            return f"Error publishing '{title}': {exc}"
+        lines = [f"Batch published {len(results)}/{len(items)} items."]
+        lines.extend(results)
+        if errors:
+            lines.append(f"Failures ({len(errors)}):")
+            lines.extend(errors)
+        return "\n".join(lines)
 
 
 # ── Post-run sprint summary (called from crew.py) ─────────────────────────────

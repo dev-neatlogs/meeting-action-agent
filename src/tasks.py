@@ -4,15 +4,20 @@ Three sequential tasks — one per agent.
 
 from crewai import Task
 from src.agents import meeting_analyst, risk_scorer_agent, notion_orchestrator
+from src.prompt_safety import openai_moderation_preflight, sanitize_research_prompt
 
 
 def build_tasks(transcript: str) -> list[Task]:
+    safe_transcript = sanitize_research_prompt(transcript)
+    moderation = openai_moderation_preflight(safe_transcript)
+    if moderation.flagged:
+        raise ValueError("User-provided prompt input failed moderation preflight.")
 
     # ── Task 1: Extract action items ──────────────────────────────────────────
     extract_actions = Task(
         description=(
             "Analyse this meeting transcript and extract every action item.\n\n"
-            f"TRANSCRIPT:\n{transcript}\n\n"
+            f"TRANSCRIPT:\n{safe_transcript}\n\n"
             "Output TWO sections:\n\n"
             "SECTION 1 — MEETING SUMMARY\n"
             "Meeting type, participants (name + role), and key decisions made.\n\n"

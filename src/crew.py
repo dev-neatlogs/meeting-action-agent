@@ -61,6 +61,8 @@ def run(
         task_idx[0] += 1
         task_start[0] = time.time()
 
+    # Sequential DAG: extract → score → publish. Latency wins: transcript cap,
+    # flash model on publish, single batch tool call + parallel Notion API writes.
     crew = Crew(
         agents=_AGENTS,
         tasks=tasks,

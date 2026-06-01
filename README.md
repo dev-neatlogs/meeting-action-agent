@@ -32,12 +32,14 @@ cp .env.example .env
 GROQ_API_KEY=your_groq_api_key
 NOTION_TOKEN=your_notion_integration_token
 NOTION_DATABASE_ID=your_notion_database_id
+SENDGRID_API_KEY=your_sendgrid_api_key
 ```
 
 To get these:
 - **GROQ_API_KEY**: [console.groq.com](https://console.groq.com)
 - **NOTION_TOKEN**: Create an integration at [notion.so/my-integrations](https://www.notion.so/my-integrations), then share your database with it
 - **NOTION_DATABASE_ID**: The 32-character ID from your Notion database URL
+- **SENDGRID_API_KEY**: SendGrid API key with **"Mail Send"** permission (used by the optional `Send Email` tool)
 
 ## Usage
 

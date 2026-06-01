@@ -14,7 +14,7 @@ def build_tasks(transcript: str) -> list[Task]:
     extract_actions = Task(
         description=(
             "Analyse this meeting transcript and extract every action item.\n\n"
-            f"TRANSCRIPT:\n{transcript}\n\n"
+            f"TRANSCRIPT (may be truncated for latency):\n{transcript}\n\n"
             "Output TWO sections:\n\n"
             "SECTION 1 — MEETING SUMMARY\n"
             "Meeting type, participants (name + role), and key decisions made.\n\n"

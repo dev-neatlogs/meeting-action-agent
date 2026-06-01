@@ -13,14 +13,23 @@ MAX_TRANSCRIPT_CHARS = int(os.getenv("MAX_TRANSCRIPT_CHARS", "24000"))
 
 
 def truncate_transcript(text: str, max_chars: int | None = None) -> str:
-    """Keep the start of long transcripts; drop the tail with a marker."""
+    """Shorten oversized transcripts while keeping opening context and closing commitments."""
     limit = max_chars if max_chars is not None else MAX_TRANSCRIPT_CHARS
-    if len(text) <= limit:
+    if limit <= 0 or len(text) <= limit:
         return text
+    head_len = int(limit * 0.7)
+    tail_len = limit - head_len
+    head = text[:head_len].rstrip()
+    tail = text[-tail_len:].lstrip()
     return (
-        text[:limit]
-        + f"\n\n[... transcript truncated: {len(text)} → {limit} chars for latency ...]"
+        f"{head}\n\n"
+        f"[... transcript truncated: {len(text)} → {limit} chars for latency ...]\n\n"
+        f"{tail}"
     )
+
+
+# Switch extraction/scoring to flash when raw input is large (≈6k+ tokens).
+FAST_MODEL_WORD_THRESHOLD = int(os.getenv("FAST_MODEL_WORD_THRESHOLD", "2500"))
 
 
 def _make_llm(

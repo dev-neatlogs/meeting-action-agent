@@ -13,6 +13,11 @@ _AGENTS = [
 ]
 
 
+def _serialize_workflow_output(result) -> str:
+    """Return the text that should be recorded as the workflow span output."""
+    return str(result)
+
+
 def _traced_run(func):
     """Wrap func in a neatlogs WORKFLOW span if tracing is configured."""
     if os.getenv("NEATLOGS_API_KEY") and os.getenv("NEATLOGS_ENDPOINT"):
@@ -40,7 +45,7 @@ def run(
     # Wrap the inner kickoff in a WORKFLOW span so every LLM call is a child
     @_traced_run
     def process_meeting():
-        return crew.kickoff()
+        return _serialize_workflow_output(crew.kickoff())
 
     # Set verbosity on all agents
     for agent in _AGENTS:
@@ -73,4 +78,4 @@ def run(
     result = process_meeting()
     summary = create_sprint_summary()
 
-    return str(result), summary
+    return result, summary
